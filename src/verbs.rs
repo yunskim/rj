@@ -1,17 +1,16 @@
-use crate::array::{JArray, JData, JVal};
+use crate::array::{JArray, JData, JVal, VerbBox};
 use crate::interp::Interpreter;
+use std::sync::Arc;
 
 /// J의 모든 동사가 구현하는 trait
-/// DF1, DF2 매크로에 해당
+/// Send + Sync: 멀티스레드 안전 (t. T. 지원을 위해)
 pub trait Verb: Send + Sync {
-    /// 단항 (monad): w만 있음
     fn monad(&self, interp: &Interpreter, w: &JVal) -> Result<JVal, String>;
-    /// 이항 (dyad): a, w 둘 다 있음
     fn dyad(&self, interp: &Interpreter, a: &JVal, w: &JVal) -> Result<JVal, String>;
     fn name(&self) -> &str;
 }
 
-/// i. (iota) - 0부터 n-1까지 정수 배열 생성
+/// i. (iota)
 pub struct Iota;
 
 impl Verb for Iota {
@@ -35,12 +34,11 @@ impl Verb for Iota {
     fn name(&self) -> &str { "i." }
 }
 
-/// + (plus) - 덧셈
+/// + (plus)
 pub struct Plus;
 
 impl Verb for Plus {
     fn monad(&self, _interp: &Interpreter, w: &JVal) -> Result<JVal, String> {
-        // monad +: conjugate (실수에서는 identity)
         Ok(Arc::clone(w))
     }
 
@@ -70,21 +68,24 @@ impl Verb for Plus {
     fn name(&self) -> &str { "+" }
 }
 
-/// / (slash) - adverb: 동사를 받아서 insert 동사를 만듦
-/// +/ → PlusReduce, */ → TimesReduce 등
+/// / (slash) - adverb
+/// u/ w → w의 원소들을 u로 fold
+/// J의 fgh[0]에 해당하는 u를 VerbBox로 보관
+/// → JArray::from_verb()로 감싸서 심볼 테이블에 저장 가능
 pub struct Slash {
-    pub u: Box<dyn Verb>,   // J의 FAV(self)->fgh[0] 에 해당
+    pub u: VerbBox,   // J의 FAV(self)->fgh[0] 에 해당
 }
 
 impl Verb for Slash {
-    /// +/ w → w의 원소들을 u로 fold
     fn monad(&self, interp: &Interpreter, w: &JVal) -> Result<JVal, String> {
+        // w가 동사인 경우: mean =: +/ 처럼 동사가 인자로 올 때
+        // (현재는 정수 배열만 처리)
         match w.as_int() {
             Some(v) => {
                 if v.is_empty() {
                     return Err("domain error: empty array".to_string());
                 }
-                // 오른쪽에서 왼쪽으로 fold (J의 insert 동작)
+                // 오른쪽에서 왼쪽으로 fold
                 let mut result = JArray::scalar_int(*v.last().unwrap());
                 for &x in v.iter().rev().skip(1) {
                     let left = JArray::scalar_int(x);
@@ -103,5 +104,3 @@ impl Verb for Slash {
     fn name(&self) -> &str { "/" }
 }
 
-// Arc를 사용하기 위해 필요
-use std::sync::Arc;
