@@ -1,0 +1,26 @@
+[package]
+name = "rj"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# CPU 병렬처리
+rayon = "1.8"
+
+# GPU 백엔드 (feature flag로 선택 가능)
+# wgpu: 크로스플랫폼 (Metal/Vulkan/DX12/WebGPU)
+wgpu = { version = "0.19", optional = true }
+# CUDA 전용 (NVIDIA)
+# cudarc = { version = "0.10", optional = true }
+# pollster: async wgpu 초기화를 sync로 실행
+pollster = { version = "0.3", optional = true }
+# bytemuck: Vec<f64> ↔ GPU 바이트 변환
+bytemuck = { version = "1.14", features = ["derive"], optional = true }
+
+[features]
+default = []
+gpu = ["wgpu", "pollster", "bytemuck"]
+
+[[bin]]
+name = "rj"
+path = "src/main.rs"
