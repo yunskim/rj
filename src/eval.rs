@@ -27,8 +27,8 @@ pub struct Token {
 }
 
 impl Token {
-    fn new(kind: TokenKind, start: usize, end: usize, line: usize, col: usize) -> Self {
-        Token { kind, span: Span::new(start, end, line, col) }
+    fn new(kind: TokenKind, span: Span) -> Self {
+        Token { kind, span }
     }
 }
 
@@ -37,17 +37,17 @@ impl Token {
 // ─────────────────────────────────────────
 
 /// Lexer: 문자열 → 토큰 목록
-/// 각 토큰에 Span (start, end, line, col) 포함
-pub fn tokenize(input: &str) -> JResult<Vec<Token>> {
+/// source_id: Interpreter.sources 에서의 인덱스
+/// 각 토큰의 Span에 source_id를 포함시켜
+/// 나중에 sources[source_id][span.start..span.end] 로 원본 복원 가능
+pub fn tokenize(input: &str, source_id: usize) -> JResult<Vec<Token>> {
     let mut tokens = Vec::new();
     let mut chars  = input.chars().peekable();
 
-    let mut pos  = 0usize;  // 바이트 오프셋
-    let mut line = 1usize;  // 줄 번호 (1-based)
-    let mut col  = 1usize;  // 칸 번호 (1-based)
+    let mut pos  = 0usize;
+    let mut line = 1usize;
+    let mut col  = 1usize;
 
-    // 현재 위치에서 다음 문자를 읽고 pos/line/col 갱신
-    // 반환값: (char, start_pos, start_line, start_col)
     macro_rules! advance {
         () => {{
             let c = chars.next().unwrap();
@@ -59,6 +59,13 @@ pub fn tokenize(input: &str) -> JResult<Vec<Token>> {
         }};
     }
 
+    // Span 생성 헬퍼 - source_id 자동 포함
+    macro_rules! span {
+        ($start:expr, $sl:expr, $sc:expr) => {
+            Span::new(source_id, $start, pos, $sl, $sc)
+        };
+    }
+
     while let Some(&c) = chars.peek() {
         match c {
             // 공백 건너뜀
@@ -66,7 +73,7 @@ pub fn tokenize(input: &str) -> JResult<Vec<Token>> {
 
             // 숫자 리터럴
             '0'..='9' => {
-                let (_, start, start_line, start_col) = advance!();
+                let (_, start, sl, sc) = advance!();
                 let mut num = String::from(c);
                 while let Some(&d) = chars.peek() {
                     if d.is_ascii_digit() {
@@ -76,21 +83,21 @@ pub fn tokenize(input: &str) -> JResult<Vec<Token>> {
                 }
                 let n: i64 = num.parse().map_err(|_|
                     JError::new(JErrorKind::Syntax,
-                        Some(Span::new(start, pos, start_line, start_col)),
+                        Some(span!(start, sl, sc)),
                         format!("invalid number: {}", num))
                 )?;
-                tokens.push(Token::new(TokenKind::Number(n), start, pos, start_line, start_col));
+                tokens.push(Token::new(TokenKind::Number(n), span!(start, sl, sc)));
             }
 
             // =: (assign)
             '=' => {
-                let (_, start, start_line, start_col) = advance!();
+                let (_, start, sl, sc) = advance!();
                 if chars.peek() == Some(&':') {
                     advance!();
-                    tokens.push(Token::new(TokenKind::Assign, start, pos, start_line, start_col));
+                    tokens.push(Token::new(TokenKind::Assign, span!(start, sl, sc)));
                 } else {
                     return Err(JError::new(JErrorKind::Syntax,
-                        Some(Span::new(start, pos, start_line, start_col)),
+                        Some(span!(start, sl, sc)),
                         "expected ':' after '='"));
                 }
             }
@@ -98,59 +105,58 @@ pub fn tokenize(input: &str) -> JResult<Vec<Token>> {
             // 단일 문자 동사/부사
             '/' => {
                 let (_, start, sl, sc) = advance!();
-                tokens.push(Token::new(TokenKind::Adverb("/".into()), start, pos, sl, sc));
+                tokens.push(Token::new(TokenKind::Adverb("/".into()), span!(start, sl, sc)));
             }
             '+' => {
                 let (_, start, sl, sc) = advance!();
-                tokens.push(Token::new(TokenKind::Verb("+".into()), start, pos, sl, sc));
+                tokens.push(Token::new(TokenKind::Verb("+".into()), span!(start, sl, sc)));
             }
             '%' => {
                 let (_, start, sl, sc) = advance!();
-                tokens.push(Token::new(TokenKind::Verb("%".into()), start, pos, sl, sc));
+                tokens.push(Token::new(TokenKind::Verb("%".into()), span!(start, sl, sc)));
             }
             '#' => {
                 let (_, start, sl, sc) = advance!();
-                tokens.push(Token::new(TokenKind::Verb("#".into()), start, pos, sl, sc));
+                tokens.push(Token::new(TokenKind::Verb("#".into()), span!(start, sl, sc)));
             }
             '-' => {
                 let (_, start, sl, sc) = advance!();
-                tokens.push(Token::new(TokenKind::Verb("-".into()), start, pos, sl, sc));
+                tokens.push(Token::new(TokenKind::Verb("-".into()), span!(start, sl, sc)));
             }
             '*' => {
                 let (_, start, sl, sc) = advance!();
-                tokens.push(Token::new(TokenKind::Verb("*".into()), start, pos, sl, sc));
+                tokens.push(Token::new(TokenKind::Verb("*".into()), span!(start, sl, sc)));
             }
             '|' => {
                 let (_, start, sl, sc) = advance!();
-                tokens.push(Token::new(TokenKind::Verb("|".into()), start, pos, sl, sc));
+                tokens.push(Token::new(TokenKind::Verb("|".into()), span!(start, sl, sc)));
             }
             '$' => {
                 let (_, start, sl, sc) = advance!();
-                tokens.push(Token::new(TokenKind::Verb("$".into()), start, pos, sl, sc));
+                tokens.push(Token::new(TokenKind::Verb("$".into()), span!(start, sl, sc)));
             }
             '<' => {
                 let (_, start, sl, sc) = advance!();
-                // <: 인지 확인
                 if chars.peek() == Some(&':') {
                     advance!();
-                    tokens.push(Token::new(TokenKind::Verb("<:".into()), start, pos, sl, sc));
+                    tokens.push(Token::new(TokenKind::Verb("<:".into()), span!(start, sl, sc)));
                 } else {
-                    tokens.push(Token::new(TokenKind::Verb("<".into()), start, pos, sl, sc));
+                    tokens.push(Token::new(TokenKind::Verb("<".into()), span!(start, sl, sc)));
                 }
             }
             '>' => {
                 let (_, start, sl, sc) = advance!();
                 if chars.peek() == Some(&':') {
                     advance!();
-                    tokens.push(Token::new(TokenKind::Verb(">:".into()), start, pos, sl, sc));
+                    tokens.push(Token::new(TokenKind::Verb(">:".into()), span!(start, sl, sc)));
                 } else {
-                    tokens.push(Token::new(TokenKind::Verb(">".into()), start, pos, sl, sc));
+                    tokens.push(Token::new(TokenKind::Verb(">".into()), span!(start, sl, sc)));
                 }
             }
 
             // 알파벳으로 시작: 이름 또는 i. 같은 동사
             'a'..='z' | 'A'..='Z' => {
-                let (_, start, start_line, start_col) = advance!();
+                let (_, start, sl, sc) = advance!();
                 let mut word = String::from(c);
                 while let Some(&d) = chars.peek() {
                     if d.is_alphanumeric() || d == '_' {
@@ -160,11 +166,11 @@ pub fn tokenize(input: &str) -> JResult<Vec<Token>> {
                 }
                 // i. 처럼 점이 붙는 primitive 동사
                 if chars.peek() == Some(&'.') {
-                    let (_, _, _, _) = advance!();
+                    advance!();
                     word.push('.');
-                    tokens.push(Token::new(TokenKind::Verb(word), start, pos, start_line, start_col));
+                    tokens.push(Token::new(TokenKind::Verb(word), span!(start, sl, sc)));
                 } else {
-                    tokens.push(Token::new(TokenKind::Name(word), start, pos, start_line, start_col));
+                    tokens.push(Token::new(TokenKind::Name(word), span!(start, sl, sc)));
                 }
             }
 
@@ -172,7 +178,7 @@ pub fn tokenize(input: &str) -> JResult<Vec<Token>> {
                 let (_, start, sl, sc) = advance!();
                 return Err(JError::new(
                     JErrorKind::Syntax,
-                    Some(Span::new(start, pos, sl, sc)),
+                    Some(span!(start, sl, sc)),
                     format!("unexpected character: '{}'", c),
                 ));
             }

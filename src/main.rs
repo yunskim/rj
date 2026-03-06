@@ -9,14 +9,16 @@ use eval::{tokenize, eval};
 use std::io::{self, BufRead, Write};
 
 fn run_line(interp: &mut Interpreter, input: &str) {
-    // 소스 등록 (에러 위치 마킹용)
+    // 소스 등록 후 source_id 획득
+    // push 전 len이 곧 새 source의 인덱스
+    let source_id = interp.sources.len();
     interp.push_source(input.to_string());
 
-    match tokenize(input) {
-        Err(e) => e.display(input),
+    match tokenize(input, source_id) {
+        Err(e) => e.display(&interp.sources),
         Ok(tokens) => {
             match eval(interp, &tokens) {
-                Ok(val)  => {
+                Ok(val) => {
                     // =: 는 결과를 출력하지 않음 (J 동작과 동일)
                     let is_assign = tokens.len() >= 2
                         && matches!(tokens[1].kind, eval::TokenKind::Assign);
@@ -24,7 +26,7 @@ fn run_line(interp: &mut Interpreter, input: &str) {
                         println!("{}", val);
                     }
                 }
-                Err(e) => e.display(input),
+                Err(e) => e.display(&interp.sources),
             }
         }
     }
