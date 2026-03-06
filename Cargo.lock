@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "rj"
+name = "j_interp"
 version = "0.1.0"
