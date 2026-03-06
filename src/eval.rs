@@ -1,7 +1,7 @@
 use crate::array::{JArray, JVal, VerbBox};
 use crate::error::{JError, JErrorKind, JResult, Span};
 use crate::interp::Interpreter;
-use crate::verbs::{Bar, Dollar, Eq, Fork, Ge, Gt, Hash, Iota, Le, Lt, Minus, Ne, Percent, Plus, Slash, Star, Verb};
+use crate::verbs::{rank1ex, rank2ex, Bar, Dollar, Eq, Fork, Ge, Gt, Hash, Iota, Le, Lt, Minus, Ne, Percent, Plus, Slash, Star, Verb};
 use std::sync::Arc;
 
 // ─────────────────────────────────────────
@@ -264,9 +264,10 @@ fn eval_rtl(interp: &Interpreter, tokens: &[Token]) -> JResult<JVal> {
         return Ok(JArray::from_verb(vb));
     }
 
-    // 동사를 w에 적용
+    // 동사를 w에 적용 - rank agreement 통해서
+    // J의 DF1RANK 에 해당: 동사 rank와 배열 rank를 비교 후 분기
     let verb = parse_verb_expr(interp, verb_tokens)?;
-    verb.monad(interp, &w)
+    rank1ex(verb.as_ref(), interp, &w, verb.monad_rank())
 }
 
 /// 오른쪽 끝에서부터 연속된 명사 토큰의 시작 인덱스
