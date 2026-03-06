@@ -8,32 +8,30 @@ use interp::Interpreter;
 use eval::{tokenize, eval};
 use std::io::{self, BufRead, Write};
 
-fn run_line(interp: &mut Interpreter, input: &str) {
-    // 소스 등록 후 source_id 획득
-    // push 전 len이 곧 새 source의 인덱스
-    let source_id = interp.sources.len();
-    interp.push_source(input.to_string());
+fn run_line(interp: &mut Interpreter, sources: &mut Vec<String>, input: &str) {
+    let source_id = sources.len();
+    sources.push(input.to_string());
 
     match tokenize(input, source_id) {
-        Err(e) => e.display(&interp.sources),
+        Err(e) => e.display(sources),
         Ok(tokens) => {
             match eval(interp, &tokens) {
                 Ok(val) => {
-                    // =: 는 결과를 출력하지 않음 (J 동작과 동일)
                     let is_assign = tokens.len() >= 2
                         && matches!(tokens[1].kind, eval::TokenKind::Assign);
                     if !is_assign {
                         println!("{}", val);
                     }
                 }
-                Err(e) => e.display(&interp.sources),
+                Err(e) => e.display(sources),
             }
         }
     }
 }
 
 fn main() {
-    let mut interp = Interpreter::new();
+    let mut interp  = Interpreter::new();
+    let mut sources = Vec::new();   // 프론트엔드가 소유
     let stdin = io::stdin();
 
     println!("rj - J interpreter in Rust");
@@ -62,7 +60,7 @@ fn main() {
                 if input.is_empty() { continue; }
                 // NB. 주석 처리
                 if input.starts_with("NB.") { continue; }
-                run_line(&mut interp, input);
+                run_line(&mut interp, &mut sources, input);
             }
             Err(e) => { eprintln!("read error: {}", e); break; }
         }
