@@ -4,12 +4,22 @@ use crate::array::JVal;
 
 /// JST에 해당 - 모든 스레드가 공유
 pub struct SharedState {
+    /// 전역 심볼 테이블 (=: 로 바인딩된 이름들)
+    /// locale 추가 시 HashMap<String, HashMap<String, JVal>> 로 확장
     pub global: RwLock<HashMap<String, JVal>>,
+
+    /// locale 간 이름 탐색 순서
+    /// locale 자체가 공유 자원이므로 탐색 순서도 공유
+    /// 예: "mylib" → ["mylib", "base"]
+    pub search_path: RwLock<HashMap<String, Vec<String>>>,
 }
 
 impl SharedState {
     pub fn new() -> Self {
-        SharedState { global: RwLock::new(HashMap::new()) }
+        SharedState {
+            global:      RwLock::new(HashMap::new()),
+            search_path: RwLock::new(HashMap::new()),
+        }
     }
 
     pub fn assign(&self, name: String, val: JVal) {
@@ -22,13 +32,23 @@ impl SharedState {
 }
 
 /// JTT에 해당 - 스레드마다 독립
+/// locale 자체는 SharedState에 있고
+/// 스레드마다 다른 것은 "지금 어느 locale에서 실행 중인가" 뿐
 pub struct ThreadState {
+    /// 지역 심볼 테이블 (=. 로 바인딩된 이름들)
     pub locsyms: HashMap<String, JVal>,
+
+    /// 현재 실행 중인 locale 이름
+    /// locale 추가 시 사용 - 지금은 항상 "base"
+    pub current_locale: String,
 }
 
 impl ThreadState {
     pub fn new() -> Self {
-        ThreadState { locsyms: HashMap::new() }
+        ThreadState {
+            locsyms:        HashMap::new(),
+            current_locale: "base".to_string(),
+        }
     }
 }
 
