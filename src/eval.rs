@@ -1,91 +1,222 @@
 use crate::array::{JArray, JVal, VerbBox};
+use crate::error::{JError, JErrorKind, JResult, Span};
 use crate::interp::Interpreter;
-use crate::verbs::{Fork, Hash, Iota, Percent, Plus, Slash, Verb};
+use crate::verbs::{Bar, Dollar, Eq, Fork, Ge, Gt, Hash, Iota, Le, Lt, Minus, Ne, Percent, Plus, Slash, Star, Verb};
 use std::sync::Arc;
 
-/// 토큰 타입
+// ─────────────────────────────────────────
+// Token
+// ─────────────────────────────────────────
+
+/// 토큰 종류
 #[derive(Debug, Clone)]
-pub enum Token {
-    Number(i64),      // 숫자 리터럴
-    Name(String),     // 이름 (변수 또는 동사 이름)
-    Verb(String),     // primitive 동사: +, %, #, i. 등
-    Adverb(String),   // 부사: /
-    Assign,           // =:
+pub enum TokenKind {
+    Number(i64),
+    Name(String),
+    Verb(String),
+    Adverb(String),
+    Assign,
 }
 
+/// 위치 정보를 포함한 토큰
+/// Span을 처음부터 포함해야 나중에 에러 위치 추적 가능
+#[derive(Debug, Clone)]
+pub struct Token {
+    pub kind: TokenKind,
+    pub span: Span,
+}
+
+impl Token {
+    fn new(kind: TokenKind, start: usize, end: usize, line: usize, col: usize) -> Self {
+        Token { kind, span: Span::new(start, end, line, col) }
+    }
+}
+
+// ─────────────────────────────────────────
+// Lexer
+// ─────────────────────────────────────────
+
 /// Lexer: 문자열 → 토큰 목록
-pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
+/// 각 토큰에 Span (start, end, line, col) 포함
+pub fn tokenize(input: &str) -> JResult<Vec<Token>> {
     let mut tokens = Vec::new();
-    let mut chars = input.trim().chars().peekable();
+    let mut chars  = input.chars().peekable();
+
+    let mut pos  = 0usize;  // 바이트 오프셋
+    let mut line = 1usize;  // 줄 번호 (1-based)
+    let mut col  = 1usize;  // 칸 번호 (1-based)
+
+    // 현재 위치에서 다음 문자를 읽고 pos/line/col 갱신
+    // 반환값: (char, start_pos, start_line, start_col)
+    macro_rules! advance {
+        () => {{
+            let c = chars.next().unwrap();
+            let sp = pos; let sl = line; let sc = col;
+            if c == '\n' { line += 1; col = 1; }
+            else { col += c.len_utf8(); }
+            pos += c.len_utf8();
+            (c, sp, sl, sc)
+        }};
+    }
 
     while let Some(&c) = chars.peek() {
         match c {
-            ' ' | '\t' => { chars.next(); }
+            // 공백 건너뜀
+            ' ' | '\t' | '\n' => { advance!(); }
 
+            // 숫자 리터럴
             '0'..='9' => {
-                let mut num = String::new();
+                let (_, start, start_line, start_col) = advance!();
+                let mut num = String::from(c);
                 while let Some(&d) = chars.peek() {
-                    if d.is_ascii_digit() { num.push(d); chars.next(); }
-                    else { break; }
+                    if d.is_ascii_digit() {
+                        let (dc, _, _, _) = advance!();
+                        num.push(dc);
+                    } else { break; }
                 }
-                tokens.push(Token::Number(num.parse().unwrap()));
+                let n: i64 = num.parse().map_err(|_|
+                    JError::new(JErrorKind::Syntax,
+                        Some(Span::new(start, pos, start_line, start_col)),
+                        format!("invalid number: {}", num))
+                )?;
+                tokens.push(Token::new(TokenKind::Number(n), start, pos, start_line, start_col));
             }
 
+            // =: (assign)
             '=' => {
-                chars.next();
+                let (_, start, start_line, start_col) = advance!();
                 if chars.peek() == Some(&':') {
-                    chars.next();
-                    tokens.push(Token::Assign);
+                    advance!();
+                    tokens.push(Token::new(TokenKind::Assign, start, pos, start_line, start_col));
                 } else {
-                    return Err("unexpected '='".to_string());
+                    return Err(JError::new(JErrorKind::Syntax,
+                        Some(Span::new(start, pos, start_line, start_col)),
+                        "expected ':' after '='"));
                 }
             }
 
-            '/' => { chars.next(); tokens.push(Token::Adverb("/".to_string())); }
-            '+' => { chars.next(); tokens.push(Token::Verb("+".to_string())); }
-            '%' => { chars.next(); tokens.push(Token::Verb("%".to_string())); }
-            '#' => { chars.next(); tokens.push(Token::Verb("#".to_string())); }
+            // 단일 문자 동사/부사
+            '/' => {
+                let (_, start, sl, sc) = advance!();
+                tokens.push(Token::new(TokenKind::Adverb("/".into()), start, pos, sl, sc));
+            }
+            '+' => {
+                let (_, start, sl, sc) = advance!();
+                tokens.push(Token::new(TokenKind::Verb("+".into()), start, pos, sl, sc));
+            }
+            '%' => {
+                let (_, start, sl, sc) = advance!();
+                tokens.push(Token::new(TokenKind::Verb("%".into()), start, pos, sl, sc));
+            }
+            '#' => {
+                let (_, start, sl, sc) = advance!();
+                tokens.push(Token::new(TokenKind::Verb("#".into()), start, pos, sl, sc));
+            }
+            '-' => {
+                let (_, start, sl, sc) = advance!();
+                tokens.push(Token::new(TokenKind::Verb("-".into()), start, pos, sl, sc));
+            }
+            '*' => {
+                let (_, start, sl, sc) = advance!();
+                tokens.push(Token::new(TokenKind::Verb("*".into()), start, pos, sl, sc));
+            }
+            '|' => {
+                let (_, start, sl, sc) = advance!();
+                tokens.push(Token::new(TokenKind::Verb("|".into()), start, pos, sl, sc));
+            }
+            '$' => {
+                let (_, start, sl, sc) = advance!();
+                tokens.push(Token::new(TokenKind::Verb("$".into()), start, pos, sl, sc));
+            }
+            '<' => {
+                let (_, start, sl, sc) = advance!();
+                // <: 인지 확인
+                if chars.peek() == Some(&':') {
+                    advance!();
+                    tokens.push(Token::new(TokenKind::Verb("<:".into()), start, pos, sl, sc));
+                } else {
+                    tokens.push(Token::new(TokenKind::Verb("<".into()), start, pos, sl, sc));
+                }
+            }
+            '>' => {
+                let (_, start, sl, sc) = advance!();
+                if chars.peek() == Some(&':') {
+                    advance!();
+                    tokens.push(Token::new(TokenKind::Verb(">:".into()), start, pos, sl, sc));
+                } else {
+                    tokens.push(Token::new(TokenKind::Verb(">".into()), start, pos, sl, sc));
+                }
+            }
 
+            // 알파벳으로 시작: 이름 또는 i. 같은 동사
             'a'..='z' | 'A'..='Z' => {
-                let mut word = String::new();
+                let (_, start, start_line, start_col) = advance!();
+                let mut word = String::from(c);
                 while let Some(&d) = chars.peek() {
-                    if d.is_alphanumeric() || d == '_' { word.push(d); chars.next(); }
-                    else { break; }
+                    if d.is_alphanumeric() || d == '_' {
+                        let (dc, _, _, _) = advance!();
+                        word.push(dc);
+                    } else { break; }
                 }
                 // i. 처럼 점이 붙는 primitive 동사
                 if chars.peek() == Some(&'.') {
+                    let (_, _, _, _) = advance!();
                     word.push('.');
-                    chars.next();
-                    tokens.push(Token::Verb(word));
+                    tokens.push(Token::new(TokenKind::Verb(word), start, pos, start_line, start_col));
                 } else {
-                    tokens.push(Token::Name(word));
+                    tokens.push(Token::new(TokenKind::Name(word), start, pos, start_line, start_col));
                 }
             }
 
-            _ => return Err(format!("unexpected character: '{}'", c)),
+            _ => {
+                let (_, start, sl, sc) = advance!();
+                return Err(JError::new(
+                    JErrorKind::Syntax,
+                    Some(Span::new(start, pos, sl, sc)),
+                    format!("unexpected character: '{}'", c),
+                ));
+            }
         }
     }
 
     Ok(tokens)
 }
 
+// ─────────────────────────────────────────
+// 평가기
+// ─────────────────────────────────────────
+
 /// primitive 동사 이름 → VerbBox
-fn make_primitive(name: &str) -> Result<VerbBox, String> {
+fn make_primitive(name: &str, span: &Span) -> JResult<VerbBox> {
     match name {
         "+"  => Ok(Arc::new(Plus)),
+        "-"  => Ok(Arc::new(Minus)),
+        "*"  => Ok(Arc::new(Star)),
         "%"  => Ok(Arc::new(Percent)),
+        "|"  => Ok(Arc::new(Bar)),
         "#"  => Ok(Arc::new(Hash)),
+        "$"  => Ok(Arc::new(Dollar)),
+        "<"  => Ok(Arc::new(Lt)),
+        ">"  => Ok(Arc::new(Gt)),
+        "<:" => Ok(Arc::new(Le)),
+        ">:" => Ok(Arc::new(Ge)),
+        "="  => Ok(Arc::new(Eq)),
+        "~:" => Ok(Arc::new(Ne)),
         "i." => Ok(Arc::new(Iota)),
-        _ => Err(format!("unknown verb: {}", name)),
+        _ => Err(JError::new(
+            JErrorKind::Value,
+            Some(span.clone()),
+            format!("unknown verb: '{}'", name),
+        )),
     }
 }
 
 /// 평가기 진입점
-pub fn eval(interp: &Interpreter, tokens: &[Token]) -> Result<JVal, String> {
+pub fn eval(interp: &Interpreter, tokens: &[Token]) -> JResult<JVal> {
     // =: 처리: "name =: expr"
     if tokens.len() >= 3 {
-        if let Token::Name(name) = &tokens[0] {
-            if let Token::Assign = &tokens[1] {
+        if let TokenKind::Name(name) = &tokens[0].kind {
+            if let TokenKind::Assign = &tokens[1].kind {
                 let val = eval(interp, &tokens[2..])?;
                 interp.assign_global(name.clone(), Arc::clone(&val));
                 return Ok(val);
@@ -97,28 +228,24 @@ pub fn eval(interp: &Interpreter, tokens: &[Token]) -> Result<JVal, String> {
 }
 
 /// 오른쪽에서 왼쪽 평가
-fn eval_rtl(interp: &Interpreter, tokens: &[Token]) -> Result<JVal, String> {
+fn eval_rtl(interp: &Interpreter, tokens: &[Token]) -> JResult<JVal> {
     if tokens.is_empty() {
-        return Err("empty expression".to_string());
+        return Err(JError::no_loc(JErrorKind::Syntax, "empty expression"));
     }
 
-    // 오른쪽 끝이 동사 토큰이면 순수 동사 표현식
+    // 오른쪽 끝이 동사이면 순수 동사 표현식
     let last = &tokens[tokens.len() - 1];
-    if !matches!(last, Token::Number(_) | Token::Name(_)) {
+    if !matches!(last.kind, TokenKind::Number(_) | TokenKind::Name(_)) {
         let vb = parse_verb_expr(interp, tokens)?;
         return Ok(JArray::from_verb(vb));
     }
 
-    // 오른쪽 끝에서부터 연속된 명사 토큰 범위 찾기
-    // i. 2 3  → verb=[i.], nouns=[2, 3]
-    // +/ a    → verb=[+,/], nouns=[a]
-    // 2 3 4   → verb=[], nouns=[2, 3, 4]
+    // 오른쪽에서 연속된 명사 토큰 범위
     let noun_start = find_noun_start(tokens);
-
     let noun_tokens = &tokens[noun_start..];
     let w = eval_noun_list(interp, noun_tokens)?;
 
-    // 명사만 있는 경우 바로 반환
+    // 명사만 있는 경우
     if noun_start == 0 {
         return Ok(w);
     }
@@ -137,15 +264,11 @@ fn eval_rtl(interp: &Interpreter, tokens: &[Token]) -> Result<JVal, String> {
 }
 
 /// 오른쪽 끝에서부터 연속된 명사 토큰의 시작 인덱스
-///
-/// [+, /, i., 2, 3]  → 3
-/// [+, /, a]         → 2
-/// [2, 3, 4]         → 0
 fn find_noun_start(tokens: &[Token]) -> usize {
     let mut i = tokens.len();
     while i > 0 {
-        match &tokens[i - 1] {
-            Token::Number(_) | Token::Name(_) => i -= 1,
+        match &tokens[i - 1].kind {
+            TokenKind::Number(_) | TokenKind::Name(_) => i -= 1,
             _ => break,
         }
     }
@@ -153,90 +276,110 @@ fn find_noun_start(tokens: &[Token]) -> usize {
 }
 
 /// 명사 토큰 목록 → JVal
-///
-/// "10"     → scalar_int(10)
-/// "2 3 4"  → vector_int([2,3,4])   ← i. 2 3 의 인자가 됨
-/// "a"      → SymTable 조회
-fn eval_noun_list(interp: &Interpreter, tokens: &[Token]) -> Result<JVal, String> {
+fn eval_noun_list(interp: &Interpreter, tokens: &[Token]) -> JResult<JVal> {
     if tokens.is_empty() {
-        return Err("empty noun".to_string());
+        return Err(JError::no_loc(JErrorKind::Syntax, "empty noun"));
     }
 
-    // 단일 토큰
     if tokens.len() == 1 {
-        return match &tokens[0] {
-            Token::Number(n) => Ok(JArray::scalar_int(*n)),
-            Token::Name(name) => {
-                interp.lookup(name)
-                    .ok_or_else(|| format!("undefined name: '{}'", name))
+        return match &tokens[0].kind {
+            TokenKind::Number(n) => Ok(JArray::scalar_int(*n)),
+            TokenKind::Name(name) => {
+                interp.lookup(name).ok_or_else(|| JError::new(
+                    JErrorKind::Value,
+                    Some(tokens[0].span.clone()),
+                    format!("undefined name: '{}'", name),
+                ))
             }
-            Token::Verb(v) => {
-                let vb = make_primitive(v)?;
+            TokenKind::Verb(v) => {
+                let vb = make_primitive(v, &tokens[0].span)?;
                 Ok(JArray::from_verb(vb))
             }
-            _ => Err("unexpected token".to_string()),
+            _ => Err(JError::new(
+                JErrorKind::Syntax,
+                Some(tokens[0].span.clone()),
+                "unexpected token",
+            )),
         };
     }
 
     // 복수 숫자 토큰 → 정수 벡터
-    // "2 3 4" → vector_int([2,3,4])
-    // 이것이 i. 2 3 의 w 인자가 됨
     let mut nums = Vec::new();
     for tok in tokens {
-        match tok {
-            Token::Number(n) => nums.push(*n),
-            Token::Name(name) => {
+        match &tok.kind {
+            TokenKind::Number(n) => nums.push(*n),
+            TokenKind::Name(name) => {
                 if nums.is_empty() {
-                    return interp.lookup(name)
-                        .ok_or_else(|| format!("undefined name: '{}'", name));
+                    return interp.lookup(name).ok_or_else(|| JError::new(
+                        JErrorKind::Value,
+                        Some(tok.span.clone()),
+                        format!("undefined name: '{}'", name),
+                    ));
                 }
-                return Err(format!("unexpected name in noun list: '{}'", name));
+                return Err(JError::new(
+                    JErrorKind::Syntax,
+                    Some(tok.span.clone()),
+                    format!("unexpected name in noun list: '{}'", name),
+                ));
             }
-            _ => return Err(format!("unexpected token in noun list: {:?}", tok)),
+            _ => return Err(JError::new(
+                JErrorKind::Syntax,
+                Some(tok.span.clone()),
+                "unexpected token in noun list",
+            )),
         }
     }
     Ok(JArray::vector_int(nums))
 }
 
 /// 동사 토큰 목록 → VerbBox
-///
-/// "+"       → Plus
-/// "i."      → Iota
-/// "+/"      → Slash { Plus }
-/// "+/ % #"  → Fork { Slash(Plus), Percent, Hash }
-/// "mean"    → SymTable에서 동사 조회
-fn parse_verb_expr(interp: &Interpreter, tokens: &[Token]) -> Result<VerbBox, String> {
+fn parse_verb_expr(interp: &Interpreter, tokens: &[Token]) -> JResult<VerbBox> {
     if tokens.is_empty() {
-        return Err("expected verb expression".to_string());
+        return Err(JError::no_loc(JErrorKind::Syntax, "expected verb expression"));
     }
 
     // 단일 토큰
     if tokens.len() == 1 {
-        return match &tokens[0] {
-            Token::Verb(v) => make_primitive(v),
-            Token::Name(name) => {
-                let val = interp.lookup(name)
-                    .ok_or_else(|| format!("undefined name: '{}'", name))?;
-                val.as_verb()
-                    .map(Arc::clone)
-                    .ok_or_else(|| format!("'{}' is not a verb", name))
+        return match &tokens[0].kind {
+            TokenKind::Verb(v) => make_primitive(v, &tokens[0].span),
+            TokenKind::Name(name) => {
+                let val = interp.lookup(name).ok_or_else(|| JError::new(
+                    JErrorKind::Value,
+                    Some(tokens[0].span.clone()),
+                    format!("undefined name: '{}'", name),
+                ))?;
+                val.as_verb().map(Arc::clone).ok_or_else(|| JError::new(
+                    JErrorKind::Domain,
+                    Some(tokens[0].span.clone()),
+                    format!("'{}' is not a verb", name),
+                ))
             }
-            _ => Err("expected verb".to_string()),
+            _ => Err(JError::new(
+                JErrorKind::Syntax,
+                Some(tokens[0].span.clone()),
+                "expected verb",
+            )),
         };
     }
 
     // "verb adverb" 패턴: +/
     if tokens.len() == 2 {
-        if let (Token::Verb(v), Token::Adverb(adv)) = (&tokens[0], &tokens[1]) {
-            let u = make_primitive(v)?;
+        if let (TokenKind::Verb(v), TokenKind::Adverb(adv)) =
+            (&tokens[0].kind, &tokens[1].kind)
+        {
+            let u = make_primitive(v, &tokens[0].span)?;
             return match adv.as_str() {
                 "/" => Ok(Arc::new(Slash { u })),
-                _   => Err(format!("unknown adverb: '{}'", adv)),
+                _   => Err(JError::new(
+                    JErrorKind::Syntax,
+                    Some(tokens[1].span.clone()),
+                    format!("unknown adverb: '{}'", adv),
+                )),
             };
         }
     }
 
-    // fork: f g h  (동사 단위 3개)
+    // fork: f g h
     let verb_units = split_into_verb_units(tokens)?;
 
     if verb_units.len() == 3 {
@@ -250,21 +393,26 @@ fn parse_verb_expr(interp: &Interpreter, tokens: &[Token]) -> Result<VerbBox, St
         return parse_verb_expr(interp, verb_units[0]);
     }
 
-    Err(format!("cannot parse verb expression: {:?}", tokens))
+    // 에러 위치: 첫 토큰 ~ 마지막 토큰
+    let span = tokens[0].span.merge(&tokens[tokens.len()-1].span);
+    Err(JError::new(
+        JErrorKind::Syntax,
+        Some(span),
+        "cannot parse verb expression",
+    ))
 }
 
 /// 토큰 목록을 동사 단위로 분할
-/// +/ % #  → [[+,/], [%], [#]]
-fn split_into_verb_units(tokens: &[Token]) -> Result<Vec<&[Token]>, String> {
+fn split_into_verb_units(tokens: &[Token]) -> JResult<Vec<&[Token]>> {
     let mut units: Vec<&[Token]> = Vec::new();
     let mut i = 0;
 
     while i < tokens.len() {
-        match &tokens[i] {
-            Token::Verb(_) => {
+        match &tokens[i].kind {
+            TokenKind::Verb(_) => {
                 // "verb adverb" 는 한 단위
                 if i + 1 < tokens.len() {
-                    if let Token::Adverb(_) = &tokens[i + 1] {
+                    if let TokenKind::Adverb(_) = &tokens[i + 1].kind {
                         units.push(&tokens[i..i+2]);
                         i += 2;
                         continue;
@@ -273,15 +421,23 @@ fn split_into_verb_units(tokens: &[Token]) -> Result<Vec<&[Token]>, String> {
                 units.push(&tokens[i..i+1]);
                 i += 1;
             }
-            Token::Name(_) => {
+            TokenKind::Name(_) => {
                 units.push(&tokens[i..i+1]);
                 i += 1;
             }
-            Token::Adverb(_) => {
-                return Err("unexpected adverb".to_string());
+            TokenKind::Adverb(_) => {
+                return Err(JError::new(
+                    JErrorKind::Syntax,
+                    Some(tokens[i].span.clone()),
+                    "unexpected adverb",
+                ));
             }
             _ => {
-                return Err(format!("unexpected token in verb expression: {:?}", tokens[i]));
+                return Err(JError::new(
+                    JErrorKind::Syntax,
+                    Some(tokens[i].span.clone()),
+                    "unexpected token in verb expression",
+                ));
             }
         }
     }
@@ -293,10 +449,10 @@ fn split_into_verb_units(tokens: &[Token]) -> Result<Vec<&[Token]>, String> {
 struct VerbWrapper(VerbBox);
 
 impl Verb for VerbWrapper {
-    fn monad(&self, interp: &Interpreter, w: &JVal) -> Result<JVal, String> {
+    fn monad(&self, interp: &Interpreter, w: &JVal) -> JResult<JVal> {
         self.0.monad(interp, w)
     }
-    fn dyad(&self, interp: &Interpreter, a: &JVal, w: &JVal) -> Result<JVal, String> {
+    fn dyad(&self, interp: &Interpreter, a: &JVal, w: &JVal) -> JResult<JVal> {
         self.0.dyad(interp, a, w)
     }
     fn name(&self) -> &str { self.0.name() }
