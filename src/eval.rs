@@ -11,7 +11,9 @@ use std::sync::Arc;
 /// 토큰 종류
 #[derive(Debug, Clone)]
 pub enum TokenKind {
-    Number(i64),
+    Number(i64),        // 정수 리터럴: 3
+    Float(f64),         // 실수 리터럴: 3.14
+    Complex(f64, f64),  // 복소수 리터럴: 3j4
     Name(String),
     Verb(String),
     Adverb(String),
@@ -71,22 +73,65 @@ pub fn tokenize(input: &str, source_id: usize) -> JResult<Vec<Token>> {
             // 공백 건너뜀
             ' ' | '\t' | '\n' => { advance!(); }
 
-            // 숫자 리터럴
+            // 숫자 리터럴: 정수 / 실수 / 복소수
+            // 3       → Integer
+            // 3.14    → Float
+            // 3j4     → Complex (J 표기)
+            // 3.5j2.1 → Complex
             '0'..='9' => {
                 let (_, start, sl, sc) = advance!();
                 let mut num = String::from(c);
+
+                // 정수 또는 소수점 앞부분 수집
                 while let Some(&d) = chars.peek() {
                     if d.is_ascii_digit() {
                         let (dc, _, _, _) = advance!();
                         num.push(dc);
                     } else { break; }
                 }
-                let n: i64 = num.parse().map_err(|_|
-                    JError::new(JErrorKind::Syntax,
-                        Some(span!(start, sl, sc)),
-                        format!("invalid number: {}", num))
-                )?;
-                tokens.push(Token::new(TokenKind::Number(n), span!(start, sl, sc)));
+
+                // 소수점?
+                let is_float = chars.peek() == Some(&'.');
+                if is_float {
+                    advance!();  // '.' 소비
+                    num.push('.');
+                    while let Some(&d) = chars.peek() {
+                        if d.is_ascii_digit() {
+                            let (dc, _, _, _) = advance!();
+                            num.push(dc);
+                        } else { break; }
+                    }
+                }
+
+                // j 로 복소수?
+                if chars.peek() == Some(&'j') {
+                    advance!();  // 'j' 소비
+                    let mut imag = String::new();
+                    // 허수부 수집 (소수점 포함 가능)
+                    while let Some(&d) = chars.peek() {
+                        if d.is_ascii_digit() || d == '.' {
+                            let (dc, _, _, _) = advance!();
+                            imag.push(dc);
+                        } else { break; }
+                    }
+                    let r: f64 = num.parse().map_err(|_|
+                        JError::new(JErrorKind::Syntax, Some(span!(start, sl, sc)),
+                            format!("invalid complex real: {}", num)))?;
+                    let i: f64 = imag.parse().map_err(|_|
+                        JError::new(JErrorKind::Syntax, Some(span!(start, sl, sc)),
+                            format!("invalid complex imag: {}", imag)))?;
+                    tokens.push(Token::new(TokenKind::Complex(r, i), span!(start, sl, sc)));
+                } else if is_float {
+                    let x: f64 = num.parse().map_err(|_|
+                        JError::new(JErrorKind::Syntax, Some(span!(start, sl, sc)),
+                            format!("invalid float: {}", num)))?;
+                    tokens.push(Token::new(TokenKind::Float(x), span!(start, sl, sc)));
+                } else {
+                    let n: i64 = num.parse().map_err(|_|
+                        JError::new(JErrorKind::Syntax, Some(span!(start, sl, sc)),
+                            format!("invalid integer: {}", num)))?;
+                    tokens.push(Token::new(TokenKind::Number(n), span!(start, sl, sc)));
+                }
             }
 
             // =: (assign)
@@ -275,7 +320,10 @@ fn find_noun_start(tokens: &[Token]) -> usize {
     let mut i = tokens.len();
     while i > 0 {
         match &tokens[i - 1].kind {
-            TokenKind::Number(_) | TokenKind::Name(_) => i -= 1,
+            TokenKind::Number(_)
+            | TokenKind::Float(_)
+            | TokenKind::Complex(..)
+            | TokenKind::Name(_) => i -= 1,
             _ => break,
         }
     }
@@ -290,7 +338,9 @@ fn eval_noun_list(interp: &Interpreter, tokens: &[Token]) -> JResult<JVal> {
 
     if tokens.len() == 1 {
         return match &tokens[0].kind {
-            TokenKind::Number(n) => Ok(JArray::scalar_int(*n)),
+            TokenKind::Number(n)     => Ok(JArray::scalar_int(*n)),
+            TokenKind::Float(x)      => Ok(JArray::scalar_float(*x)),
+            TokenKind::Complex(r, i) => Ok(JArray::scalar_complex(*r, *i)),
             TokenKind::Name(name) => {
                 interp.lookup(name).ok_or_else(|| JError::new(
                     JErrorKind::Value,
@@ -302,41 +352,60 @@ fn eval_noun_list(interp: &Interpreter, tokens: &[Token]) -> JResult<JVal> {
                 let vb = make_primitive(v, &tokens[0].span)?;
                 Ok(JArray::from_verb(vb))
             }
-            _ => Err(JError::new(
-                JErrorKind::Syntax,
-                Some(tokens[0].span.clone()),
-                "unexpected token",
-            )),
+            _ => Err(JError::new(JErrorKind::Syntax,
+                Some(tokens[0].span.clone()), "unexpected token")),
         };
     }
 
-    // 복수 숫자 토큰 → 정수 벡터
-    let mut nums = Vec::new();
+    // 복수 토큰 → 동일 타입 벡터
+    // 타입이 섞이면 numeric tower로 승격
+    // 예: 1 2.5 3 → Float 벡터
+    //     1 2j3   → Complex 벡터
+    let mut has_float   = false;
+    let mut has_complex = false;
+
     for tok in tokens {
         match &tok.kind {
-            TokenKind::Number(n) => nums.push(*n),
+            TokenKind::Float(_)   => has_float = true,
+            TokenKind::Complex(..) => has_complex = true,
+            TokenKind::Number(_)  => {}
             TokenKind::Name(name) => {
-                if nums.is_empty() {
-                    return interp.lookup(name).ok_or_else(|| JError::new(
-                        JErrorKind::Value,
-                        Some(tok.span.clone()),
-                        format!("undefined name: '{}'", name),
-                    ));
-                }
-                return Err(JError::new(
-                    JErrorKind::Syntax,
+                return interp.lookup(name).ok_or_else(|| JError::new(
+                    JErrorKind::Value,
                     Some(tok.span.clone()),
-                    format!("unexpected name in noun list: '{}'", name),
+                    format!("undefined name: '{}'", name),
                 ));
             }
-            _ => return Err(JError::new(
-                JErrorKind::Syntax,
-                Some(tok.span.clone()),
-                "unexpected token in noun list",
-            )),
+            _ => return Err(JError::new(JErrorKind::Syntax,
+                Some(tok.span.clone()), "unexpected token in noun list")),
         }
     }
-    Ok(JArray::vector_int(nums))
+
+    if has_complex {
+        // Complex 벡터: 각 원소를 (r, i) 쌍으로
+        let pairs: Vec<(f64, f64)> = tokens.iter().map(|tok| match &tok.kind {
+            TokenKind::Number(n)     => (*n as f64, 0.0),
+            TokenKind::Float(x)      => (*x, 0.0),
+            TokenKind::Complex(r, i) => (*r, *i),
+            _ => unreachable!(),
+        }).collect();
+        Ok(JArray::vector_complex(pairs))
+    } else if has_float {
+        // Float 벡터
+        let data: Vec<f64> = tokens.iter().map(|tok| match &tok.kind {
+            TokenKind::Number(n) => *n as f64,
+            TokenKind::Float(x)  => *x,
+            _ => unreachable!(),
+        }).collect();
+        Ok(JArray::vector_float(data))
+    } else {
+        // Integer 벡터
+        let data: Vec<i64> = tokens.iter().map(|tok| match &tok.kind {
+            TokenKind::Number(n) => *n,
+            _ => unreachable!(),
+        }).collect();
+        Ok(JArray::vector_int(data))
+    }
 }
 
 /// 동사 토큰 목록 → VerbBox
