@@ -81,8 +81,6 @@ fn make_primitive(name: &str) -> Result<VerbBox, String> {
 }
 
 /// 평가기 진입점
-/// 명사 → JVal (데이터)
-/// 동사 표현식 → JVal (JArray::from_verb로 감싼 동사)
 pub fn eval(interp: &Interpreter, tokens: &[Token]) -> Result<JVal, String> {
     // =: 처리: "name =: expr"
     if tokens.len() >= 3 {
@@ -99,83 +97,114 @@ pub fn eval(interp: &Interpreter, tokens: &[Token]) -> Result<JVal, String> {
 }
 
 /// 오른쪽에서 왼쪽 평가
-///
-/// J의 파싱 규칙:
-///   토큰을 오른쪽부터 보면서
-///   명사가 나오면 스택에 쌓고
-///   동사가 나오면 명사에 적용
-///
-/// 동사 표현식만 있으면 (명사 없으면) derived verb 반환
 fn eval_rtl(interp: &Interpreter, tokens: &[Token]) -> Result<JVal, String> {
     if tokens.is_empty() {
         return Err("empty expression".to_string());
     }
 
-    // 토큰 목록을 "동사 토큰 그룹"으로 분류
-    // 오른쪽 끝이 명사인지 동사인지 확인
+    // 오른쪽 끝이 동사 토큰이면 순수 동사 표현식
     let last = &tokens[tokens.len() - 1];
-
-    let is_noun = matches!(last, Token::Number(_) | Token::Name(_));
-
-    if !is_noun {
-        // 오른쪽 끝이 동사 → 순수 동사 표현식 → VerbBox로 반환
-        // 예: +/ % #  → Fork { Slash(Plus), Percent, Hash }
-        // 예: +/      → Slash { Plus }
+    if !matches!(last, Token::Number(_) | Token::Name(_)) {
         let vb = parse_verb_expr(interp, tokens)?;
         return Ok(JArray::from_verb(vb));
     }
 
-    // 오른쪽 끝이 명사 → w 계산 후 동사 적용
-    let w = eval_noun(interp, last)?;
+    // 오른쪽 끝에서부터 연속된 명사 토큰 범위 찾기
+    // i. 2 3  → verb=[i.], nouns=[2, 3]
+    // +/ a    → verb=[+,/], nouns=[a]
+    // 2 3 4   → verb=[], nouns=[2, 3, 4]
+    let noun_start = find_noun_start(tokens);
 
-    if tokens.len() == 1 {
+    let noun_tokens = &tokens[noun_start..];
+    let w = eval_noun_list(interp, noun_tokens)?;
+
+    // 명사만 있는 경우 바로 반환
+    if noun_start == 0 {
         return Ok(w);
     }
 
-    // 나머지 왼쪽 토큰들 → 동사
-    let verb_tokens = &tokens[..tokens.len() - 1];
+    let verb_tokens = &tokens[..noun_start];
 
-    // w가 동사이면 (심볼 테이블에서 꺼낸 derived verb)
-    // verb_tokens + w 전체가 동사 합성
+    // w가 동사이면 tacit 합성
     if w.is_verb() {
-        // 예: sum =: +/  이후  sum % #  같은 경우
-        // → Fork 구성
-        let left_vb = parse_verb_expr(interp, verb_tokens)?;
-        let right_vb = Arc::clone(w.as_verb().unwrap());
-        // verb_tokens가 단일 동사이면 그냥 반환, 아니면 fork
-        // 실제로는 이 경우가 아직 없으므로 단순 처리
-        let _ = right_vb;
-        return Ok(JArray::from_verb(left_vb));
+        let vb = parse_verb_expr(interp, verb_tokens)?;
+        return Ok(JArray::from_verb(vb));
     }
 
-    // 일반 경우: 동사를 w에 적용
+    // 동사를 w에 적용
     let verb = parse_verb_expr(interp, verb_tokens)?;
     verb.monad(interp, &w)
 }
 
-/// 명사 토큰 → JVal
-fn eval_noun(interp: &Interpreter, token: &Token) -> Result<JVal, String> {
-    match token {
-        Token::Number(n) => Ok(JArray::scalar_int(*n)),
-        Token::Name(name) => {
-            interp.lookup(name)
-                .ok_or_else(|| format!("undefined name: '{}'", name))
+/// 오른쪽 끝에서부터 연속된 명사 토큰의 시작 인덱스
+///
+/// [+, /, i., 2, 3]  → 3
+/// [+, /, a]         → 2
+/// [2, 3, 4]         → 0
+fn find_noun_start(tokens: &[Token]) -> usize {
+    let mut i = tokens.len();
+    while i > 0 {
+        match &tokens[i - 1] {
+            Token::Number(_) | Token::Name(_) => i -= 1,
+            _ => break,
         }
-        _ => Err("expected noun".to_string()),
     }
+    i
+}
+
+/// 명사 토큰 목록 → JVal
+///
+/// "10"     → scalar_int(10)
+/// "2 3 4"  → vector_int([2,3,4])   ← i. 2 3 의 인자가 됨
+/// "a"      → SymTable 조회
+fn eval_noun_list(interp: &Interpreter, tokens: &[Token]) -> Result<JVal, String> {
+    if tokens.is_empty() {
+        return Err("empty noun".to_string());
+    }
+
+    // 단일 토큰
+    if tokens.len() == 1 {
+        return match &tokens[0] {
+            Token::Number(n) => Ok(JArray::scalar_int(*n)),
+            Token::Name(name) => {
+                interp.lookup(name)
+                    .ok_or_else(|| format!("undefined name: '{}'", name))
+            }
+            Token::Verb(v) => {
+                let vb = make_primitive(v)?;
+                Ok(JArray::from_verb(vb))
+            }
+            _ => Err("unexpected token".to_string()),
+        };
+    }
+
+    // 복수 숫자 토큰 → 정수 벡터
+    // "2 3 4" → vector_int([2,3,4])
+    // 이것이 i. 2 3 의 w 인자가 됨
+    let mut nums = Vec::new();
+    for tok in tokens {
+        match tok {
+            Token::Number(n) => nums.push(*n),
+            Token::Name(name) => {
+                if nums.is_empty() {
+                    return interp.lookup(name)
+                        .ok_or_else(|| format!("undefined name: '{}'", name));
+                }
+                return Err(format!("unexpected name in noun list: '{}'", name));
+            }
+            _ => return Err(format!("unexpected token in noun list: {:?}", tok)),
+        }
+    }
+    Ok(JArray::vector_int(nums))
 }
 
 /// 동사 토큰 목록 → VerbBox
 ///
-/// 지원하는 패턴:
-///   v           → primitive: +, %, #, i.
-///   name        → named verb (심볼 테이블 조회)
-///   v adv       → derived: +/
-///   f g h       → fork: +/ % #  = (f w) g (h w)
-///   f adv g h   → fork with adverb: +/ % #
-///
-/// J의 동사 파싱은 오른쪽에서 왼쪽이지만
-/// fork는 f g h 순서로 읽음
+/// "+"       → Plus
+/// "i."      → Iota
+/// "+/"      → Slash { Plus }
+/// "+/ % #"  → Fork { Slash(Plus), Percent, Hash }
+/// "mean"    → SymTable에서 동사 조회
 fn parse_verb_expr(interp: &Interpreter, tokens: &[Token]) -> Result<VerbBox, String> {
     if tokens.is_empty() {
         return Err("expected verb expression".to_string());
@@ -186,7 +215,6 @@ fn parse_verb_expr(interp: &Interpreter, tokens: &[Token]) -> Result<VerbBox, St
         return match &tokens[0] {
             Token::Verb(v) => make_primitive(v),
             Token::Name(name) => {
-                // 심볼 테이블에서 동사 조회
                 let val = interp.lookup(name)
                     .ok_or_else(|| format!("undefined name: '{}'", name))?;
                 val.as_verb()
@@ -208,14 +236,10 @@ fn parse_verb_expr(interp: &Interpreter, tokens: &[Token]) -> Result<VerbBox, St
         }
     }
 
-    // fork 패턴 파싱: f g h
-    // 토큰들을 왼쪽부터 동사 단위로 분할
-    // 예: +/ % #  → [+/] [%] [#]  → Fork { Slash(+), %, # }
-    // 예: i. % #  → [i.] [%] [#]  → Fork { Iota, %, # }
+    // fork: f g h  (동사 단위 3개)
     let verb_units = split_into_verb_units(tokens)?;
 
     if verb_units.len() == 3 {
-        // fork: f g h
         let f = parse_verb_expr(interp, verb_units[0])?;
         let g = parse_verb_expr(interp, verb_units[1])?;
         let h = parse_verb_expr(interp, verb_units[2])?;
@@ -230,16 +254,15 @@ fn parse_verb_expr(interp: &Interpreter, tokens: &[Token]) -> Result<VerbBox, St
 }
 
 /// 토큰 목록을 동사 단위로 분할
-/// +/ % #  → [[+, /], [%], [#]]
-/// i. % #  → [[i.], [%], [#]]
+/// +/ % #  → [[+,/], [%], [#]]
 fn split_into_verb_units(tokens: &[Token]) -> Result<Vec<&[Token]>, String> {
     let mut units: Vec<&[Token]> = Vec::new();
     let mut i = 0;
 
     while i < tokens.len() {
         match &tokens[i] {
-            // "verb adverb" 는 한 단위
             Token::Verb(_) => {
+                // "verb adverb" 는 한 단위
                 if i + 1 < tokens.len() {
                     if let Token::Adverb(_) = &tokens[i + 1] {
                         units.push(&tokens[i..i+2]);
@@ -250,7 +273,6 @@ fn split_into_verb_units(tokens: &[Token]) -> Result<Vec<&[Token]>, String> {
                 units.push(&tokens[i..i+1]);
                 i += 1;
             }
-            // 이름도 동사 단위 하나
             Token::Name(_) => {
                 units.push(&tokens[i..i+1]);
                 i += 1;
@@ -267,8 +289,7 @@ fn split_into_verb_units(tokens: &[Token]) -> Result<Vec<&[Token]>, String> {
     Ok(units)
 }
 
-/// VerbBox를 Box<dyn Verb>처럼 쓰기 위한 래퍼
-/// make_verb_from_tokens의 반환 타입 통일용
+/// VerbBox 래퍼
 struct VerbWrapper(VerbBox);
 
 impl Verb for VerbWrapper {

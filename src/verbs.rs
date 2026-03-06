@@ -11,19 +11,38 @@ pub trait Verb: Send + Sync {
 }
 
 /// i. (iota)
+/// monad i. n       → 0 1 2 ... n-1          (rank 1)
+/// monad i. 2 3     → 2x3 행렬 0..5          (rank 2)
+/// monad i. 2 3 4   → 2x3x4 배열 0..23       (rank 3)
 pub struct Iota;
 
 impl Verb for Iota {
     fn monad(&self, _interp: &Interpreter, w: &JVal) -> Result<JVal, String> {
         match w.as_int() {
-            Some(v) if w.rank == 0 => {
-                let n = v[0];
-                if n < 0 {
-                    return Err("domain error: i. requires non-negative integer".to_string());
+            Some(v) => {
+                // 스칼라: i. 10 → 0 1 2 ... 9
+                if w.rank == 0 {
+                    let n = v[0];
+                    if n < 0 {
+                        return Err("domain error: i. requires non-negative integer".to_string());
+                    }
+                    return Ok(JArray::vector_int((0..n).collect()));
                 }
-                Ok(JArray::vector_int((0..n).collect()))
+
+                // 벡터: i. 2 3 → 2x3 행렬
+                // shape의 각 원소가 각 차원 크기
+                if w.rank == 1 {
+                    let shape: Vec<usize> = v.iter().map(|&x| {
+                        if x < 0 { 0 } else { x as usize }
+                    }).collect();
+                    let count: usize = shape.iter().product::<usize>().max(1);
+                    let data: Vec<i64> = (0..count as i64).collect();
+                    return Ok(JArray::array_int(shape, data));
+                }
+
+                Err("domain error: i. requires scalar or vector".to_string())
             }
-            _ => Err("domain error: i. requires scalar integer".to_string()),
+            _ => Err("domain error: i. requires integer argument".to_string()),
         }
     }
 
@@ -116,15 +135,15 @@ impl Verb for Percent {
 }
 
 /// # (tally / copy)
-/// monad #: 원소 개수 반환
-/// dyad #: copy (미구현)
+/// monad #: leading axis 크기
+///   # 1 2 3     → 3
+///   # i. 2 3    → 2  (행 수)
+///   # i. 2 3 4  → 2  (최외곽 차원)
 pub struct Hash;
 
 impl Verb for Hash {
     fn monad(&self, _interp: &Interpreter, w: &JVal) -> Result<JVal, String> {
-        // # w → w의 원소 개수
-        let n = if w.rank == 0 { 1 } else { w.shape[0] } as i64;
-        Ok(JArray::scalar_int(n))
+        Ok(JArray::scalar_int(w.tally() as i64))
     }
 
     fn dyad(&self, _interp: &Interpreter, _a: &JVal, _w: &JVal) -> Result<JVal, String> {
