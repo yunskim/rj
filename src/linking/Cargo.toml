@@ -1,0 +1,11 @@
+[package]
+name = "j_engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libloading = "0.8"
+
+[[example]]
+name = "basic"
+path = "examples/basic.rs"
